@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>豆豆报价助手</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'PingFang SC','Hiragino Sans GB',sans-serif;background:#f5f5f5;display:flex;justify-content:center;align-items:center;min-height:100vh;padding:12px}
+@keyframes blink{0%,80%,100%{opacity:.15}40%{opacity:1}}
+@keyframes spin{to{transform:rotate(360deg)}}
+input,textarea,button{font-family:inherit}
+input[type=number]::-webkit-inner-spin-button{-webkit-appearance:none}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useRef,useEffect} = React;
+const API = "/api/chat";
+const MODEL = "claude-sonnet-4-20250514";
+const TAX = 0.09;
+const CATS = [
+  {id:"tile",icon:"⬛",name:"瓷砖",unit:"㎡"},
+  {id:"furn",icon:"🪑",name:"家具",unit:"件"},
+  {id:"sanit",icon:"🚿",name:"卫浴",unit:"套"},
+  {id:"appl",icon:"📺",name:"家电",unit:"台"},
+  {id:"alum",icon:"🔩",name:"铝材",unit:"米"},
+  {id:"light",icon:"💡",name:"灯具",unit:"套"},
+  {id:"door",icon:"🚪",name:"门窗",unit:"㎡"},
+  {id:"cabinet",icon:"🗄",name:"橱柜衣柜",unit:"延米"},
+];
+const PROMPTS = [
+  "120㎡新房，客厅铺800×800通体大理石，卫生间300×600防滑砖",
+  "帮我报一套卫浴：马桶、淋浴房1.2×0.9、浴室柜80cm",
+  "全屋定制橱柜8延米、衣柜12延米，品牌欧派",
+  "办公室300间，每间装一套空调1.5匹，批量价格",
+];
+const SYSTEM = `你是佛山建材行业专业报价助手，熟悉瓷砖、家具、卫浴、家电、铝材、灯具、门窗、橱柜衣柜的佛山本地市场价格。
+用户描述需求后，你：1.简短确认 2.列出产品清单和佛山参考价 3.询问缺少的信息
+回复末尾加（不显示在正文）：ITEMS_JSON:[{"name":"名称","spec":"规格","unit":"单位","qty":数量,"price":单价}]
+如识别到客户名加：CLIENT:名称
+价格参考：瓷砖60-800/㎡ 定制橱柜800-1800/延米 定制衣柜600-1500/延米 断桥铝窗380-680/㎡ 马桶600-3000 淋浴房800-3500 浴室柜500-2500
+用中文，简洁专业。`;
+
+const fmt = n => "¥"+Math.round(n).toLocaleString("zh-CN");
+const today = () => new Date().toLocaleDateString("zh-CN");
+const validDate = () => {const d=new Date();d.setDate(d.getDate()+30);return d.toLocaleDateString("zh-CN");};
+
+function App(){
+  const [tab,setTab]=useState("chat");
+  const [msgs,setMsgs]=useState([{id:0,role:"ai",text:null,jsx:true}]);
+  const [hist,setHist]=useState([]);
+  const [input,setInput]=useState("");
+  const [busy,setBusy]=useState(false);
+  const [items,setItems]=useState([]);
+  const [client,setClient]=useState("");
+  const [recording,setRecording]=useState(false);
+  const idRef=useRef(1);
+  const bottomRef=useRef(null);
+  const recRef=useRef(null);
+  useEffect(()=>{bottomRef.current?.scrollIntoView({behavior:"smooth"})},[msgs]);
+
+  async function send(text=input.trim()){
+    if(!text||busy)return;
+    setInput("");
+    const uid=idRef.current++;
+    setMsgs(m=>[...m,{id:uid,role:"user",text}]);
+    const newH=[...hist,{role:"user",content:text}];
+    setBusy(true);
+    const lid=idRef.current++;
+    setMsgs(m=>[...m,{id:lid,role:"ai",loading:true}]);
+    try{
+      const r=await fetch(API,{method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({model:MODEL,max_tokens:1200,system:SYSTEM,messages:newH})});
+      const d=await r.json();
+      const reply=d.content?.find(b=>b.type==="text")?.text||"抱歉，请重试。";
+      const im=reply.match(/ITEMS_JSON:(\[[\s\S]*?\])/);
+      if(im){try{const ps=JSON.parse(im[1]);setItems(prev=>{const m=[...prev];ps.forEach(ni=>{if(!m.find(p=>p.name===ni.name))m.push({...ni,id:Date.now()+Math.random()})});return m});}catch(e){}}
+      const cm=reply.match(/CLIENT:(.+)/);
+      if(cm)setClient(cm[1].trim());
+      const clean=reply.replace(/ITEMS_JSON:[\s\S]*?\]/,"").replace(/CLIENT:.+/,"").trim();
+      setHist([...newH,{role:"assistant",content:reply}]);
+      setMsgs(m=>m.map(x=>x.id===lid?{...x,text:clean,loading:false}:x));
+    }catch(e){
+      setMsgs(m=>m.map(x=>x.id===lid?{...x,text:"网络错误，请重试。",loading:false}:x));
+    }
+    setBusy(false);
+  }
+
+  function toggleVoice(){
+    if(recording){recRef.current?.stop();setRecording(false);return;}
+    const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+    if(!SR){alert("请使用Chrome浏览器开启语音");return;}
+    const rec=new SR();rec.lang="zh-CN";rec.continuous=false;rec.interimResults=true;
+    rec.onstart=()=>setRecording(true);
+    rec.onresult=e=>{const t=Array.from(e.results).map(r=>r[0].transcript).join("");setInput(t);};
+    rec.onend=()=>{setRecording(false);if(input)send(input);};
+    rec.onerror=()=>setRecording(false);
+    recRef.current=rec;rec.start();
+  }
+
+  const sub=items.reduce((s,it)=>s+(it.qty||0)*(it.price||0),0);
+  const tax=sub*TAX;
+  const total=sub+tax;
+
+  const S={
+    wrap:{maxWidth:900,width:"100%",height:660,display:"flex",flexDirection:"column",background:"#fff",borderRadius:16,overflow:"hidden",boxShadow:"0 4px 24px rgba(0,0,0,0.10)"},
+    topbar:{display:"flex",alignItems:"center",padding:"10px 16px",borderBottom:"1px solid #f0ede8",gap:12},
+    catbar:{display:"flex",gap:6,padding:"8px 14px",borderBottom:"1px solid #f0ede8",overflowX:"auto",flexShrink:0},
+    catbtn:{display:"flex",flexDirection:"column",alignItems:"center",gap:2,padding:"5px 10px",borderRadius:8,border:"1px solid #ede8df",background:"#fdf9f4",cursor:"pointer",flexShrink:0},
+    msgs:{flex:1,overflowY:"auto",padding:"14px 14px 6px",display:"flex",flexDirection:"column",gap:10},
+    inputbar:{padding:"10px 12px",borderTop:"1px solid #f0ede8",display:"flex",gap:7,alignItems:"flex-end"},
+    textarea:{flex:1,resize:"none",border:"1px solid #e0d8cc",borderRadius:10,padding:"9px 12px",fontSize:13,background:"#fdf9f4",color:"#2c1a0e",outline:"none",lineHeight:1.5,minHeight:40,maxHeight:88},
+    sendbtn:(ok)=>({height:40,padding:"0 16px",borderRadius:10,border:"none",background:ok?"#3D2B1F":"#e8e0d5",color:ok?"#F5ECD7":"#aaa",fontSize:13,cursor:ok?"pointer":"default",transition:"all 0.2s"}),
+    voicebtn:{width:40,height:40,borderRadius:"50%",border:"1px solid #e0d8cc",background:"#fdf9f4",cursor:"pointer",fontSize:17,display:"flex",alignItems:"center",justifyContent:"center",flexShrink:0},
+    tabBtn:(a)=>({padding:"5px 16px",borderRadius:20,border:a?"none":"1px solid #e0d8cc",background:a?"#3D2B1F":"transparent",color:a?"#F5ECD7":"#8a7060",fontSize:12,cursor:"pointer",fontWeight:a?500:400,position:"relative"}),
+    chip:{fontSize:12,padding:"5px 10px",borderRadius:14,border:"1px solid #C8A96E",color:"#7A5C2E",background:"#FDF6EC",cursor:"pointer"},
+    aibubble:{padding:"9px 13px",borderRadius:"4px 14px 14px 14px",fontSize:13,lineHeight:1.65,background:"#fdf9f4",border:"1px solid #ede8df",color:"#2c1a0e",maxWidth:"78%"},
+    userbubble:{padding:"9px 13px",borderRadius:"14px 4px 14px 14px",fontSize:13,lineHeight:1.65,background:"#3D2B1F",color:"#F5ECD7",maxWidth:"78%"},
+  };
+
+  return (
+    <div style={S.wrap}>
+      {/* Topbar */}
+      <div style={S.topbar}>
+        <div style={{flex:1}}>
+          <span style={{fontWeight:600,fontSize:15}}>豆豆报价助手</span>
+          <span style={{fontSize:11,color:"#9a8070",marginLeft:8}}>佛山 · AI 智能报价</span>
+        </div>
+        <button style={S.tabBtn(tab==="chat")} onClick={()=>setTab("chat")}>对话</button>
+        <button style={S.tabBtn(tab==="preview")} onClick={()=>setTab("preview")}>
+          报价单{items.length>0&&<span style={{position:"absolute",top:-4,right:-4,background:"#C8A96E",color:"#fff",fontSize:9,borderRadius:8,padding:"0 4px"}}>{items.length}</span>}
+        </button>
+      </div>
+
+      {tab==="chat"?(
+        <>
+          {/* Category bar */}
+          <div style={S.catbar}>
+            {CATS.map(c=>(
+              <button key={c.id} style={S.catbtn} onClick={()=>setInput(c.name+"报价，")}>
+                <span style={{fontSize:16}}>{c.icon}</span>
+                <span style={{fontSize:10,color:"#8a7060",whiteSpace:"nowrap"}}>{c.name}</span>
+              </button>
+            ))}
+          </div>
+          {/* Messages */}
+          <div style={S.msgs}>
+            {msgs.map(msg=>(
+              <div key={msg.id} style={{display:"flex",gap:8,flexDirection:msg.role==="user"?"row-reverse":"row",alignItems:"flex-end"}}>
+                {msg.role==="ai"&&<div style={{width:28,height:28,borderRadius:"50%",background:"#FDF6EC",border:"1px solid #E8D0A0",display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,flexShrink:0}}>✦</div>}
+                <div>
+                  {msg.role==="ai"?(
+                    <div style={S.aibubble}>
+                      {msg.jsx?(
+                        <div>
+                          <p style={{marginBottom:8,fontWeight:500}}>你好！我是豆豆报价助手 👋</p>
+                          <p style={{color:"#8a7060",fontSize:12,marginBottom:10}}>直接说或输入要报价的材料，我帮你快速整理成报价单。</p>
+                          <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                            {PROMPTS.map((q,i)=><button key={i} style={S.chip} onClick={()=>send(q)}>{q.slice(0,22)}…</button>)}
+                          </div>
+                        </div>
+                      ):msg.loading?(
+                        <span style={{display:"inline-flex",gap:4,alignItems:"center"}}>
+                          {[0,1,2].map(i=><span key={i} style={{width:6,height:6,borderRadius:"50%",background:"#C8A96E",display:"inline-block",animation:`blink 1.2s ${i*0.2}s infinite`}}/>)}
+                        </span>
+                      ):(msg.text||"").split("\n").filter(l=>l.trim()).map((l,i)=><p key={i} style={{margin:"2px 0"}}>{l}</p>)}
+                    </div>
+                  ):(
+                    <div style={S.userbubble}>{msg.text}</div>
+                  )}
+                </div>
+              </div>
+            ))}
+            <div ref={bottomRef}/>
+          </div>
+          {/* Input */}
+          <div style={S.inputbar}>
+            <button onClick={toggleVoice} style={{...S.voicebtn,background:recording?"#FDF6EC":"#fdf9f4",border:recording?"1px solid #C8A96E":"1px solid #e0d8cc"}}>
+              {recording?"🔴":"🎙️"}
+            </button>
+            <textarea value={input} onChange={e=>setInput(e.target.value)}
+              onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}}}
+              placeholder={recording?"正在录音，说完自动发送…":"输入材料名称、规格、数量… (Enter发送)"}
+              style={S.textarea} rows={1}/>
+            <button onClick={()=>send()} disabled={busy||!input.trim()} style={S.sendbtn(!busy&&input.trim())}>发送</button>
+          </div>
+        </>
+      ):(
+        /* Preview */
+        <div style={{flex:1,display:"flex",overflow:"hidden"}}>
+          {/* Items panel */}
+          <div style={{width:240,borderRight:"1px solid #f0ede8",display:"flex",flexDirection:"column",overflow:"hidden"}}>
+            <div style={{padding:"10px 14px",borderBottom:"1px solid #f0ede8",display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,fontWeight:500}}>产品明细</span>
+              <button onClick={()=>setItems([])} style={{fontSize:11,color:"#aaa",background:"none",border:"none",cursor:"pointer"}}>清空</button>
+            </div>
+            <div style={{flex:1,overflowY:"auto",padding:"8px 10px"}}>
+              {items.length===0?(
+                <div style={{textAlign:"center",padding:"40px 16px",color:"#bbb",fontSize:13}}>
+                  <p style={{fontSize:28,marginBottom:8}}>📋</p>
+                  <p>在对话中报价后<br/>产品自动出现</p>
+                </div>
+              ):items.map((it,i)=>(
+                <div key={it.id||i} style={{padding:"8px 6px",borderRadius:8,marginBottom:4,borderBottom:"1px solid #f5f0ea"}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <p style={{fontSize:12,fontWeight:500,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{it.name}</p>
+                    <button onClick={()=>setItems(its=>its.filter((_,j)=>j!==i))} style={{background:"none",border:"none",cursor:"pointer",fontSize:12,color:"#ccc",flexShrink:0}}>✕</button>
+                  </div>
+                  {it.spec&&<p style={{fontSize:11,color:"#9a8070",marginBottom:4}}>{it.spec}</p>}
+                  <div style={{display:"flex",gap:4,alignItems:"center",marginTop:4}}>
+                    <input type="number" value={it.qty} min={0} onChange={e=>setItems(its=>its.map((x,j)=>j===i?{...x,qty:+e.target.value}:x))}
+                      style={{width:44,padding:"2px 5px",border:"1px solid #e0d8cc",borderRadius:5,fontSize:12,textAlign:"center",background:"#fdf9f4"}}/>
+                    <span style={{fontSize:11,color:"#aaa"}}>{it.unit||"件"}</span>
+                    <span style={{fontSize:11,color:"#ccc"}}>×</span>
+                    <input type="number" value={it.price} min={0} onChange={e=>setItems(its=>its.map((x,j)=>j===i?{...x,price:+e.target.value}:x))}
+                      style={{flex:1,padding:"2px 5px",border:"1px solid #e0d8cc",borderRadius:5,fontSize:12,background:"#fdf9f4"}}/>
+                  </div>
+                  <div style={{textAlign:"right",fontSize:12,fontWeight:500,color:"#7A5C2E",marginTop:3}}>{fmt((it.qty||0)*(it.price||0))}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{borderTop:"1px solid #f0ede8",padding:"10px 14px",background:"#fdf9f4"}}>
+              {[["小计",fmt(sub)],[`增值税 ${(TAX*100).toFixed(0)}%`,fmt(tax)]].map(([l,v])=>(
+                <div key={l} style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                  <span style={{fontSize:12,color:"#9a8070"}}>{l}</span>
+                  <span style={{fontSize:12}}>{v}</span>
+                </div>
+              ))}
+              <div style={{display:"flex",justifyContent:"space-between",marginTop:6,paddingTop:6,borderTop:"1px solid #e8e0d5"}}>
+                <span style={{fontSize:13,fontWeight:600}}>合计</span>
+                <span style={{fontSize:14,fontWeight:700,color:"#7A5C2E"}}>{fmt(total)}</span>
+              </div>
+            </div>
+          </div>
+          {/* Quote doc */}
+          <div style={{flex:1,overflowY:"auto",padding:16,background:"#f5f0ea"}}>
+            <div style={{background:"#fff",borderRadius:10,border:"1px solid #ede8df",padding:"20px 20px",marginBottom:12}}>
+              <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:18,paddingBottom:14,borderBottom:"1px solid #f0ede8"}}>
+                <div>
+                  <h2 style={{fontSize:17,fontWeight:700,letterSpacing:"0.04em",marginBottom:3}}>豆豆报价单</h2>
+                  <p style={{fontSize:11,color:"#9a8070"}}>佛山建材 · AI智能报价</p>
+                </div>
+                <div style={{textAlign:"right"}}>
+                  <p style={{fontSize:11,color:"#9a8070"}}>报价日期：{today()}</p>
+                  <p style={{fontSize:11,color:"#9a8070"}}>有效期至：{validDate()}</p>
+                </div>
+              </div>
+              <div style={{marginBottom:16}}>
+                <label style={{fontSize:10,color:"#9a8070",display:"block",marginBottom:3}}>客户 / 项目名称</label>
+                <input value={client} onChange={e=>setClient(e.target.value)} placeholder="请输入客户或项目名称"
+                  style={{width:"100%",border:"none",borderBottom:"1px solid #f0ede8",background:"transparent",fontSize:14,fontWeight:500,color:"#2c1a0e",outline:"none",paddingBottom:4}}/>
+              </div>
+              {items.length===0?(
+                <p style={{textAlign:"center",padding:"24px 0",color:"#ccc",fontSize:13}}>尚未添加产品，请在对话中描述需求</p>
+              ):(
+                <table style={{width:"100%",borderCollapse:"collapse",fontSize:12}}>
+                  <thead>
+                    <tr style={{borderBottom:"1px solid #ede8df"}}>
+                      {["产品名称","规格","数量","单位","单价","小计"].map((h,i)=>(
+                        <th key={h} style={{padding:"6px 6px",textAlign:i>=4?"right":"left",fontSize:10,color:"#9a8070",fontWeight:500}}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {items.map((it,i)=>(
+                      <tr key={i} style={{borderBottom:"1px solid #f5f0ea"}}>
+                        <td style={{padding:"7px 6px",fontWeight:500}}>{it.name}</td>
+                        <td style={{padding:"7px 6px",color:"#9a8070",fontSize:11}}>{it.spec||"—"}</td>
+                        <td style={{padding:"7px 6px"}}>{it.qty}</td>
+                        <td style={{padding:"7px 6px",color:"#9a8070"}}>{it.unit||"件"}</td>
+                        <td style={{padding:"7px 6px",textAlign:"right"}}>¥{(it.price||0).toLocaleString()}</td>
+                        <td style={{padding:"7px 6px",textAlign:"right",fontWeight:500,color:"#7A5C2E"}}>¥{((it.qty||0)*(it.price||0)).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr><td colSpan={5} style={{padding:"7px 6px 2px",textAlign:"right",fontSize:11,color:"#9a8070"}}>小计</td><td style={{padding:"7px 6px 2px",textAlign:"right",fontSize:12}}>{fmt(sub)}</td></tr>
+                    <tr><td colSpan={5} style={{padding:"2px 6px",textAlign:"right",fontSize:11,color:"#9a8070"}}>增值税 9%</td><td style={{padding:"2px 6px",textAlign:"right",fontSize:12}}>{fmt(tax)}</td></tr>
+                    <tr style={{borderTop:"1px solid #ede8df"}}>
+                      <td colSpan={5} style={{padding:"8px 6px 0",textAlign:"right",fontWeight:600,fontSize:13}}>合计总价</td>
+                      <td style={{padding:"8px 6px 0",textAlign:"right",fontWeight:700,fontSize:14,color:"#7A5C2E"}}>{fmt(total)}</td>
+                    </tr>
+                  </tfoot>
+                </table>
+              )}
+              <div style={{marginTop:16,paddingTop:12,borderTop:"1px solid #f0ede8",fontSize:11,color:"#b0a090",lineHeight:1.8}}>
+                <p>· 以上报价含增值税，不含运费及安装费</p>
+                <p>· 本报价有效期30天，逾期请重新确认</p>
+                <p>· 大宗订单可议价，欢迎洽谈</p>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:8,justifyContent:"flex-end"}}>
+              <button onClick={()=>setTab("chat")} style={{padding:"8px 16px",borderRadius:8,border:"1px solid #e0d8cc",background:"none",fontSize:13,cursor:"pointer"}}>继续对话</button>
+              <button onClick={()=>window.print()} style={{padding:"8px 20px",borderRadius:8,border:"none",background:"#3D2B1F",color:"#F5ECD7",fontSize:13,cursor:"pointer",fontWeight:500}}>🖨 打印 / 保存PDF</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
