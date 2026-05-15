@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
 // ── Constants ──────────────────────────────────────────────────────────────
-const API = "/api/chat";
+const API = window.__API__ || "/api/chat";
 const MODEL = "claude-sonnet-4-20250514";
 
 // Foshan building materials categories & quick templates
